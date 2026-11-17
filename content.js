@@ -17,7 +17,11 @@
 
   // 拡張機能コンテキストが有効か確認して安全にメッセージ送信
   function isContextValid() {
-    return typeof chrome !== 'undefined' && Boolean(chrome.runtime && chrome.runtime.id);
+    try {
+      return typeof chrome !== 'undefined' && Boolean(chrome.runtime && chrome.runtime.id);
+    } catch (_) {
+      return false;
+    }
   }
 
   function handleInvalidContext() {
