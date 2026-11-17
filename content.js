@@ -15,21 +15,53 @@
     exportCsv: true
   };
 
+  // 拡張機能コンテキストが有効か確認して安全にメッセージ送信
+  function isContextValid() {
+    return typeof chrome !== 'undefined' && Boolean(chrome.runtime && chrome.runtime.id);
+  }
+
+  function handleInvalidContext() {
+    alert('拡張機能が更新されました。このページを再読み込み（F5）してからもう一度お試しください。');
+  }
+
   function fetchLicenseStatus() {
+    if (!isContextValid()) {
+      return Promise.resolve(currentLicense);
+    }
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'GET_LICENSE_STATUS' }, (res) => {
-        if (res) currentLicense = res;
+      try {
+        chrome.runtime.sendMessage({ action: 'GET_LICENSE_STATUS' }, (res) => {
+          if (chrome.runtime.lastError) {
+            resolve(currentLicense);
+            return;
+          }
+          if (res) currentLicense = res;
+          resolve(currentLicense);
+        });
+      } catch (_) {
         resolve(currentLicense);
-      });
+      }
     });
   }
 
   function openUpgradePage() {
-    chrome.runtime.sendMessage({ action: 'OPEN_PAYMENT_PAGE' }, (res) => {
-      if (res && !res.ok && res.reason === 'NOT_CONFIGURED') {
-        alert('ExtensionPay ID が未設定です。拡張機能アイコンから設定・テストしてください。');
-      }
-    });
+    if (!isContextValid()) {
+      handleInvalidContext();
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage({ action: 'OPEN_PAYMENT_PAGE' }, (res) => {
+        if (chrome.runtime.lastError) {
+          handleInvalidContext();
+          return;
+        }
+        if (res && !res.ok && res.reason === 'NOT_CONFIGURED') {
+          alert('ExtensionPay ID が未設定です。拡張機能アイコンから設定・テストしてください。');
+        }
+      });
+    } catch (_) {
+      handleInvalidContext();
+    }
   }
 
   function renderLicenseUI(license) {
@@ -685,6 +717,11 @@
   }
 
   async function launchDownload(itemsToDownload) {
+    if (!isContextValid()) {
+      handleInvalidContext();
+      return;
+    }
+
     const license = await fetchLicenseStatus();
     renderLicenseUI(license);
 
@@ -716,16 +753,25 @@
     updateStatus(`${targetItems.length}件のPDF生成を開始します...`, 0);
 
     const exportCsv = license.isPaid && document.getElementById('amz-export-csv').checked;
-    chrome.runtime.sendMessage({
-      action: 'START_DOWNLOAD',
-      payload: { items: targetItems, exportCsv }
-    });
+    try {
+      chrome.runtime.sendMessage({
+        action: 'START_DOWNLOAD',
+        payload: { items: targetItems, exportCsv }
+      });
+    } catch (_) {
+      setRunningState(false);
+      handleInvalidContext();
+    }
   }
 
   function cancelBatchProcess() {
     isCancelled = true;
     updateStatus('中止しています...');
-    chrome.runtime.sendMessage({ action: 'CANCEL_DOWNLOAD' });
+    if (isContextValid()) {
+      try {
+        chrome.runtime.sendMessage({ action: 'CANCEL_DOWNLOAD' });
+      } catch (_) {}
+    }
   }
 
   chrome.runtime.onMessage.addListener((message) => {
