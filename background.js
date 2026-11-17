@@ -240,6 +240,22 @@ async function recordDownloadedOrderIds(newIds) {
   });
 }
 
+// ポップオーバーHTMLから適格請求書（原本PDF）URLを抽出
+async function resolvePopoverInvoiceUrl(popoverUrl) {
+  try {
+    const res = await fetch(popoverUrl, { credentials: 'include' });
+    if (!res.ok) return null;
+    const html = await res.text();
+    // 適格請求書やインボイス付近、または /documents/download/ を含むリンクを正規表現で抽出
+    const matches = Array.from(html.matchAll(/href=["']([^"']*\/documents\/download\/[^"']*)["']/gi));
+    if (!matches.length) return null;
+    const rawHref = matches[0][1].replace(/&amp;/g, '&');
+    return rawHref.startsWith('http') ? rawHref : `https://www.amazon.co.jp${rawHref}`;
+  } catch (_) {
+    return null;
+  }
+}
+
 // 直接PDFリンク（適格請求書など）をフェッチして保存
 async function downloadDirectPdf(url, filename) {
   const res = await fetch(url, { credentials: 'include' });
@@ -340,6 +356,14 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
       );
 
       let saved = false;
+
+      if (item.popoverUrl && !item.isDirectPdf) {
+        const directUrl = await resolvePopoverInvoiceUrl(item.popoverUrl);
+        if (directUrl) {
+          item.url = directUrl;
+          item.isDirectPdf = true;
+        }
+      }
 
       if (item.isDirectPdf) {
         try {

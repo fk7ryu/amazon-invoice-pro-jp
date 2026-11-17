@@ -460,10 +460,14 @@
     });
   }
 
-  async function resolveInvoicePdfUrl(card) {
+  // カード内の直接PDFリンクまたはポップオーバーURLを同期取得
+  function getInvoiceRefs(card) {
     const directPdf = card.querySelector('a[href*="/documents/download/"]');
     if (directPdf) {
-      return new URL(directPdf.getAttribute('href'), 'https://www.amazon.co.jp').href;
+      return {
+        directPdfUrl: new URL(directPdf.getAttribute('href'), 'https://www.amazon.co.jp').href,
+        popoverUrl: null
+      };
     }
 
     const popoverTrigger = card.querySelector('[data-a-popover*="invoice"], [data-a-popover*="receipt"]');
@@ -471,27 +475,18 @@
       try {
         const popoverData = JSON.parse(popoverTrigger.getAttribute('data-a-popover') || '{}');
         if (popoverData.url) {
-          const popoverUrl = new URL(popoverData.url, 'https://www.amazon.co.jp').href;
-          const res = await fetch(popoverUrl, { credentials: 'include' });
-          if (res.ok) {
-            const html = await res.text();
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const links = Array.from(doc.querySelectorAll('a[href]'));
-            const invoicePdfLink =
-              links.find((a) => /適格請求書|インボイス/i.test(a.textContent) && a.getAttribute('href').includes('/documents/download/')) ||
-              links.find((a) => a.getAttribute('href').includes('/documents/download/'));
-            if (invoicePdfLink) {
-              return new URL(invoicePdfLink.getAttribute('href'), 'https://www.amazon.co.jp').href;
-            }
-          }
+          return {
+            directPdfUrl: null,
+            popoverUrl: new URL(popoverData.url, 'https://www.amazon.co.jp').href
+          };
         }
       } catch (_) {}
     }
-    return null;
+    return { directPdfUrl: null, popoverUrl: null };
   }
 
   // Amazon個人・Amazon Business 両対応の注文カード抽出
-  async function extractOrdersFromDoc(doc, { preferInvoicePdf, filenameTemplate }) {
+  function extractOrdersFromDoc(doc, { preferInvoicePdf, filenameTemplate }) {
     let cards = doc.querySelectorAll(
       '.order-card, [data-component-type="order-card"], .js-order-card, .a-box-group.order, .ab-order-card'
     );
@@ -532,12 +527,15 @@
 
       let url = `https://www.amazon.co.jp/gp/css/summary/print.html?ie=UTF8&orderID=${orderId}`;
       let isDirectPdf = false;
+      let popoverUrl = null;
 
       if (preferInvoicePdf) {
-        const directPdfUrl = await resolveInvoicePdfUrl(card);
-        if (directPdfUrl) {
-          url = directPdfUrl;
+        const refs = getInvoiceRefs(card);
+        if (refs.directPdfUrl) {
+          url = refs.directPdfUrl;
           isDirectPdf = true;
+        } else if (refs.popoverUrl) {
+          popoverUrl = refs.popoverUrl;
         }
       }
 
@@ -555,6 +553,7 @@
         orderId,
         url,
         isDirectPdf,
+        popoverUrl,
         date: dateStr,
         dateIso,
         priceNum,
@@ -637,100 +636,95 @@
     }
   }
 
+  // スキャンステップ（実ページ遷移で確実に全ページ取得）
+  async function runScanStep(state) {
+    isCancelled = false;
+    setRunningState(true);
+    updateStatus(`スキャン中 (${state.currentPage}ページ目 / 現在 ${state.items.length}件)...`, 0);
+
+    const downloadedSet = new Set(state.downloadedOrderIds || []);
+    const pageOrders = extractOrdersFromDoc(document, {
+      preferInvoicePdf: state.preferInvoicePdf,
+      filenameTemplate: state.filenameTemplate
+    });
+
+    let reachedBeforeDateFrom = false;
+    for (const order of pageOrders) {
+      if (order.dateIso) {
+        if (state.dateTo && order.dateIso > state.dateTo) continue;
+        if (state.dateFrom && order.dateIso < state.dateFrom) {
+          reachedBeforeDateFrom = true;
+          continue;
+        }
+      }
+
+      if (state.skipDownloaded && downloadedSet.has(order.orderId)) {
+        state.skippedCount++;
+        continue;
+      }
+
+      if (!state.items.some((x) => x.orderId === order.orderId)) {
+        state.items.push(order);
+      }
+    }
+
+    const nextUrl = getNextPageUrl(document, state.currentPage);
+    if (!reachedBeforeDateFrom && state.currentPage < state.maxPages && nextUrl && !isCancelled) {
+      const nextState = {
+        ...state,
+        currentPage: state.currentPage + 1
+      };
+      updateStatus(`次ページへ移動中 (${state.currentPage}ページ目完了: ${state.items.length}件)...`, 0);
+      chrome.storage.local.set({ amzScanState: nextState }, () => {
+        setTimeout(() => {
+          if (!isCancelled) {
+            window.location.href = nextUrl;
+          }
+        }, 1000);
+      });
+      return;
+    }
+
+    // スキャン完了
+    chrome.storage.local.remove('amzScanState');
+    setRunningState(false);
+
+    scannedItems = state.items;
+    renderPreviewList(scannedItems);
+
+    if (scannedItems.length === 0) {
+      const msg = state.skippedCount > 0
+        ? `新規対象の注文はありませんでした（取得済みスキップ: ${state.skippedCount}件）`
+        : '条件に一致する注文が見つかりませんでした。';
+      updateStatus(msg);
+    } else {
+      updateStatus(`${scannedItems.length}件見つかりました。対象を選んで保存を押してください。`);
+    }
+  }
+
   // ステップ1: 注文をスキャンしてチェックボックス一覧を表示
   async function scanOrdersProcess() {
     if (isProcessing) return;
 
-    isCancelled = false;
     lastFailedItems = [];
     document.getElementById('amz-retry-btn').style.display = 'none';
-    setRunningState(true);
 
     const { downloadedOrderIds } = await loadSettings();
-    const downloadedSet = new Set(downloadedOrderIds);
+    const initialState = {
+      isScanning: true,
+      currentPage: 1,
+      maxPages: parseInt(document.getElementById('amz-fetch-depth').value, 10),
+      dateFrom: document.getElementById('amz-date-from').value,
+      dateTo: document.getElementById('amz-date-to').value,
+      filenameTemplate: document.getElementById('amz-filename-tpl').value.trim() || DEFAULT_SETTINGS.filenameTemplate,
+      preferInvoicePdf: document.getElementById('amz-prefer-invoice').checked,
+      skipDownloaded: document.getElementById('amz-skip-downloaded').checked,
+      downloadedOrderIds,
+      skippedCount: 0,
+      items: []
+    };
 
-    const maxPages = parseInt(document.getElementById('amz-fetch-depth').value, 10);
-    const dateFrom = document.getElementById('amz-date-from').value;
-    const dateTo = document.getElementById('amz-date-to').value;
-    const filenameTemplate = document.getElementById('amz-filename-tpl').value.trim() || DEFAULT_SETTINGS.filenameTemplate;
-    const preferInvoicePdf = document.getElementById('amz-prefer-invoice').checked;
-    const skipDownloaded = document.getElementById('amz-skip-downloaded').checked;
-
-    const allItems = [];
-    let skippedCount = 0;
-    let currentDoc = document;
-    let currentPage = 1;
-
-    try {
-      while (currentPage <= maxPages && !isCancelled) {
-        updateStatus(`注文一覧をスキャン中 (${currentPage}ページ目)...`, 0);
-
-        const pageOrders = await extractOrdersFromDoc(currentDoc, {
-          preferInvoicePdf,
-          filenameTemplate
-        });
-
-        let reachedBeforeDateFrom = false;
-
-        for (const order of pageOrders) {
-          if (order.dateIso) {
-            if (dateTo && order.dateIso > dateTo) continue;
-            if (dateFrom && order.dateIso < dateFrom) {
-              reachedBeforeDateFrom = true;
-              continue;
-            }
-          }
-
-          if (skipDownloaded && downloadedSet.has(order.orderId)) {
-            skippedCount++;
-            continue;
-          }
-
-          if (!allItems.some((x) => x.orderId === order.orderId)) {
-            allItems.push(order);
-          }
-        }
-
-        const nextUrl = getNextPageUrl(currentDoc, currentPage);
-        if (reachedBeforeDateFrom || currentPage >= maxPages || !nextUrl || isCancelled) {
-          break;
-        }
-
-        await new Promise((r) => setTimeout(r, 1500));
-        if (isCancelled) break;
-
-        const res = await fetch(nextUrl, { credentials: 'include' });
-        if (!res.ok) {
-          throw new Error(`ページ取得に失敗しました (HTTP ${res.status})`);
-        }
-        const html = await res.text();
-        currentDoc = new DOMParser().parseFromString(html, 'text/html');
-        currentPage++;
-      }
-
-      setRunningState(false);
-
-      if (isCancelled) {
-        updateStatus('スキャンを中止しました');
-        return;
-      }
-
-      scannedItems = allItems;
-      renderPreviewList(scannedItems);
-
-      if (scannedItems.length === 0) {
-        const msg = skippedCount > 0
-          ? `新規対象の注文はありませんでした（取得済みスキップ: ${skippedCount}件）`
-          : '条件に一致する注文が見つかりませんでした。';
-        updateStatus(msg);
-      } else {
-        updateStatus(`${scannedItems.length}件見つかりました。対象を選んで保存を押してください。`);
-      }
-    } catch (err) {
-      console.error('[Amazon領収書PDF] スキャンエラー:', err);
-      updateStatus(`エラー: ${err.message}`);
-      setRunningState(false);
-    }
+    await runScanStep(initialState);
   }
 
   // ステップ2: チェックされた注文のみPDF保存を開始
@@ -804,9 +798,11 @@
 
   function cancelBatchProcess() {
     isCancelled = true;
-    updateStatus('中止しています...');
+    setRunningState(false);
+    updateStatus('中止しました');
     if (isContextValid()) {
       try {
+        chrome.storage.local.remove('amzScanState');
         chrome.runtime.sendMessage({ action: 'CANCEL_DOWNLOAD' });
       } catch (_) {}
     }
@@ -836,5 +832,13 @@
     }
   });
 
-  injectControlUI();
+  injectControlUI().then(() => {
+    // 複数ページスキャン途中のページ遷移であれば自動で続きから再開
+    if (!isContextValid()) return;
+    chrome.storage.local.get(['amzScanState'], (res) => {
+      if (res && res.amzScanState && res.amzScanState.isScanning) {
+        setTimeout(() => runScanStep(res.amzScanState), 600);
+      }
+    });
+  });
 })();
