@@ -227,6 +227,11 @@
       #amz-preview-list .amz-item-row:hover {
         background: #fffbeb;
       }
+      @media print {
+        #amz-invoice-panel {
+          display: none !important;
+        }
+      }
     `;
     document.head.appendChild(style);
   }
