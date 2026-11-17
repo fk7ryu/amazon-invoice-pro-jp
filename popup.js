@@ -20,8 +20,8 @@ function refreshLicenseUI() {
       restoreBtn.style.display = 'block';
     }
 
-    // ExtensionPay ID 未設定時のみ開発用切替ボタンを表示
-    devToggleBtn.style.display = res.isConfigured ? 'none' : 'block';
+    // ローカル開発版のみ開発用切替ボタンを表示
+    devToggleBtn.style.display = res.isUnpackedDev ? 'block' : 'none';
   });
 }
 

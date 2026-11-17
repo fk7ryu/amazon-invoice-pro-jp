@@ -47,22 +47,33 @@ async function incrementMonthlyUsage(addedCount) {
   });
 }
 
+// ローカル開発版（ストア経由でない＝update_urlがない）か判定
+const isUnpackedDev = () => !chrome.runtime.getManifest().update_url;
+
 // 課金状態と無料枠残数を取得
 async function getLicenseStatus() {
   let isPaid = false;
+  const devMode = isUnpackedDev();
 
-  if (extpay) {
+  if (devMode) {
+    // 開発者モード読み込み時はデフォルトで無制限（切替ボタンで無料枠テストも可）
+    const devPro = await new Promise((resolve) => {
+      chrome.storage.local.get(['devProMode'], (res) => {
+        resolve(res.devProMode === undefined ? true : Boolean(res.devProMode));
+      });
+    });
+    if (devPro) {
+      isPaid = true;
+    }
+  }
+
+  if (!isPaid && extpay) {
     try {
       const user = await extpay.getUser();
       isPaid = Boolean(user && user.paid);
     } catch (err) {
       console.warn('[ExtPay] ユーザー状態取得エラー:', err);
     }
-  } else {
-    // ExtensionPay ID未設定時は開発テスト用フラグを参照
-    isPaid = await new Promise((resolve) => {
-      chrome.storage.local.get(['devProMode'], (res) => resolve(Boolean(res.devProMode)));
-    });
   }
 
   const usage = await getMonthlyUsage();
@@ -71,6 +82,7 @@ async function getLicenseStatus() {
   return {
     isPaid,
     isConfigured: isExtPayConfigured(),
+    isUnpackedDev: devMode,
     monthlyUsed: usage.count,
     monthlyLimit: FREE_MONTHLY_LIMIT,
     remaining: isPaid ? null : remaining
@@ -104,8 +116,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'TOGGLE_DEV_PRO') {
+    if (!isUnpackedDev()) {
+      sendResponse({ devProMode: false });
+      return false;
+    }
     chrome.storage.local.get(['devProMode'], (res) => {
-      const next = !res.devProMode;
+      const current = res.devProMode === undefined ? true : Boolean(res.devProMode);
+      const next = !current;
       chrome.storage.local.set({ devProMode: next }, () => {
         sendResponse({ devProMode: next });
       });
