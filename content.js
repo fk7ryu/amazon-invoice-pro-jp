@@ -1,6 +1,8 @@
 (() => {
   let isProcessing = false;
   let isCancelled = false;
+  let scannedItems = [];
+  let lastFailedItems = [];
   let currentLicense = { isPaid: false, isConfigured: false, monthlyUsed: 0, monthlyLimit: 10, remaining: 10 };
 
   const DEFAULT_SETTINGS = {
@@ -13,31 +15,23 @@
     exportCsv: true
   };
 
-  // ライセンス状態を background.js から取得
   function fetchLicenseStatus() {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage({ action: 'GET_LICENSE_STATUS' }, (res) => {
-        if (res) {
-          currentLicense = res;
-        }
+        if (res) currentLicense = res;
         resolve(currentLicense);
       });
     });
   }
 
-  // 決済ページを開く（未設定時は案内）
   function openUpgradePage() {
     chrome.runtime.sendMessage({ action: 'OPEN_PAYMENT_PAGE' }, (res) => {
       if (res && !res.ok && res.reason === 'NOT_CONFIGURED') {
-        alert(
-          'ExtensionPay ID（EXTPAY_EXTENSION_ID）がまだ設定されていません。\n' +
-          'テスト確認する場合は、ブラウザ右上の拡張機能アイコンをクリックし、「[開発用] Pro/Free 切替」を押してください。'
-        );
+        alert('ExtensionPay ID が未設定です。拡張機能アイコンから設定・テストしてください。');
       }
     });
   }
 
-  // プランバッジの表示を更新
   function renderLicenseUI(license) {
     currentLicense = license;
     const badgeEl = document.getElementById('amz-plan-badge');
@@ -69,24 +63,22 @@
     }
   }
 
-  // 設定の読み込み
   async function loadSettings() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(['amzSettings', 'downloadedOrderIds'], (res) => {
+      chrome.storage.local.get(['amzSettings', 'downloadedOrderIds', 'panelPos'], (res) => {
         resolve({
           settings: { ...DEFAULT_SETTINGS, ...(res.amzSettings || {}) },
-          downloadedOrderIds: Array.isArray(res.downloadedOrderIds) ? res.downloadedOrderIds : []
+          downloadedOrderIds: Array.isArray(res.downloadedOrderIds) ? res.downloadedOrderIds : [],
+          panelPos: res.panelPos || null
         });
       });
     });
   }
 
-  // 設定の保存
   function saveSettings(settings) {
     chrome.storage.local.set({ amzSettings: settings });
   }
 
-  // ファイル名に使える安全な文字列へ変換
   function sanitizeFilePart(str) {
     return String(str || '')
       .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
@@ -94,7 +86,6 @@
       .trim();
   }
 
-  // テンプレートから保存先パスを生成
   function buildFilename(template, item) {
     const safeTitle = sanitizeFilePart(item.title || '商品');
     const year = item.date !== '不明日付' ? item.date.slice(0, 4) : '不明年';
@@ -121,24 +112,117 @@
     return `Amazon領収書/${name}`;
   }
 
+  // パネルのドラッグ移動を設定
+  function enableDrag(panel, handle) {
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    handle.addEventListener('mousedown', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      document.body.style.userSelect = 'none';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth - 8);
+      const maxTop = Math.max(0, window.innerHeight - 60);
+      const left = Math.max(8, Math.min(maxLeft, e.clientX - offsetX));
+      const top = Math.max(8, Math.min(maxTop, e.clientY - offsetY));
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      chrome.storage.local.set({
+        panelPos: {
+          top: parseInt(panel.style.top, 10) || 64,
+          left: parseInt(panel.style.left, 10) || 16
+        }
+      });
+    });
+  }
+
+  // HTMLエスケープ
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // スキャン結果のチェックボックス一覧を描画
+  function renderPreviewList(items) {
+    const wrap = document.getElementById('amz-preview-wrap');
+    const listEl = document.getElementById('amz-preview-list');
+    const countEl = document.getElementById('amz-selected-count');
+    const downloadBtn = document.getElementById('amz-download-selected-btn');
+
+    if (!wrap || !listEl) return;
+    if (!items.length) {
+      wrap.style.display = 'none';
+      return;
+    }
+
+    listEl.innerHTML = items
+      .map(
+        (it, idx) => `
+        <label style="display:flex; align-items:flex-start; gap:6px; padding:4px 2px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size:11px;">
+          <input type="checkbox" class="amz-item-check" data-index="${idx}" checked style="margin-top:2px;" />
+          <div style="flex:1; min-width:0;">
+            <div style="font-weight:bold; color:#111;">${escapeHtml(it.dateIso || it.date)} / ${escapeHtml(it.priceStr)}</div>
+            <div style="color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(it.title || it.orderId)}</div>
+          </div>
+        </label>`
+      )
+      .join('');
+
+    const updateSelectedCount = () => {
+      const checked = listEl.querySelectorAll('.amz-item-check:checked').length;
+      if (countEl) countEl.textContent = String(checked);
+      if (downloadBtn) {
+        downloadBtn.disabled = checked === 0;
+        downloadBtn.style.opacity = checked === 0 ? '0.5' : '1';
+      }
+    };
+
+    listEl.querySelectorAll('.amz-item-check').forEach((cb) => {
+      cb.addEventListener('change', updateSelectedCount);
+    });
+
+    wrap.style.display = 'block';
+    updateSelectedCount();
+  }
+
   // 操作パネルを画面左上に挿入
   async function injectControlUI() {
     if (document.getElementById('amz-invoice-panel')) return;
 
-    const [{ settings, downloadedOrderIds }, license] = await Promise.all([
+    const [{ settings, downloadedOrderIds, panelPos }, license] = await Promise.all([
       loadSettings(),
       fetchLicenseStatus()
     ]);
+
+    const initTop = panelPos ? Math.min(window.innerHeight - 80, Math.max(8, panelPos.top)) : 64;
+    const initLeft = panelPos ? Math.min(window.innerWidth - 310, Math.max(8, panelPos.left)) : 16;
 
     const panel = document.createElement('div');
     panel.id = 'amz-invoice-panel';
     panel.style.cssText = `
       position: fixed;
-      top: 64px;
-      left: 16px;
+      top: ${initTop}px;
+      left: ${initLeft}px;
       z-index: 999999;
-      width: 290px;
-      padding: 14px 16px;
+      width: 300px;
+      padding: 12px 14px;
       background: #ffffff;
       border: 2px solid #FF9900;
       border-radius: 8px;
@@ -149,15 +233,17 @@
     `;
 
     panel.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <span style="font-weight:bold; font-size:13.5px;">領収書PDF一括取得</span>
+      <div id="amz-drag-handle" title="ドラッグで移動" style="
+        display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; cursor:move;
+      ">
+        <span style="font-weight:bold; font-size:13.5px;">⠿ 領収書PDF一括取得</span>
         <button id="amz-toggle-btn" title="最小化" style="
           background:none; border:none; cursor:pointer; font-size:14px; color:#555; padding:0 4px;
         ">－</button>
       </div>
 
       <div id="amz-panel-body">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:8px;">
           <span id="amz-plan-badge" style="
             font-size:11px; font-weight:bold; padding:3px 7px; border-radius:4px; border:1px solid #ffe082;
           ">確認中...</span>
@@ -188,7 +274,7 @@
           </div>
         </div>
 
-        <details id="amz-advanced-details" style="margin-bottom:10px; border:1px solid #eee; border-radius:4px; padding:6px 8px; background:#fafafa;">
+        <details id="amz-advanced-details" style="margin-bottom:8px; border:1px solid #eee; border-radius:4px; padding:6px 8px; background:#fafafa;">
           <summary style="cursor:pointer; font-size:11.5px; color:#333; font-weight:bold;">詳細設定（ファイル名・インボイス等）</summary>
           <div style="margin-top:8px;">
             <label style="display:block; margin-bottom:3px; color:#444; font-size:11px;">ファイル名形式（変数: {date} {price} {orderId} {title} {year}）</label>
@@ -215,28 +301,49 @@
           </div>
         </details>
 
+        <div id="amz-preview-wrap" style="display:none; margin-bottom:8px; border:1px solid #ddd; border-radius:4px; padding:6px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; font-size:11px;">
+            <span style="font-weight:bold;">対象注文（<span id="amz-selected-count">0</span>件選択中）</span>
+            <div>
+              <button id="amz-select-all-btn" type="button" style="background:none; border:none; color:#0066c0; cursor:pointer; font-size:11px; padding:0 4px;">全選択</button>
+              <button id="amz-deselect-all-btn" type="button" style="background:none; border:none; color:#0066c0; cursor:pointer; font-size:11px; padding:0 4px;">解除</button>
+            </div>
+          </div>
+          <div id="amz-preview-list" style="max-height:140px; overflow-y:auto; border-top:1px solid #eee;"></div>
+          <button id="amz-download-selected-btn" type="button" style="
+            width:100%; margin-top:6px; background:#FF9900; color:#111; font-weight:bold;
+            border:1px solid #a88734; padding:7px 10px; border-radius:4px; cursor:pointer;
+          ">選択した注文をPDF保存</button>
+        </div>
+
         <div id="amz-progress-wrap" style="display:none; margin-bottom:8px;">
           <div style="width:100%; height:6px; background:#eee; border-radius:3px; overflow:hidden;">
             <div id="amz-progress-bar" style="width:0%; height:100%; background:#FF9900; transition:width 0.2s;"></div>
           </div>
         </div>
 
-        <div id="amz-status-text" style="color:#555; font-size:11.5px; margin-bottom:10px; min-height:18px; line-height:1.4;">待機中</div>
+        <div id="amz-status-text" style="color:#555; font-size:11.5px; margin-bottom:8px; min-height:18px; line-height:1.4;">待機中</div>
 
         <div style="display:flex; gap:6px;">
-          <button id="amz-start-btn" style="
+          <button id="amz-scan-btn" style="
             flex:1; background:#FF9900; color:#111; font-weight:bold;
             border:1px solid #a88734; padding:7px 10px; border-radius:4px; cursor:pointer;
-          ">PDF取得開始</button>
+          ">注文をスキャン</button>
           <button id="amz-cancel-btn" style="
             display:none; background:#f3f3f3; color:#333;
             border:1px solid #ccc; padding:7px 10px; border-radius:4px; cursor:pointer;
           ">中止</button>
         </div>
+
+        <button id="amz-retry-btn" type="button" style="
+          display:none; width:100%; margin-top:6px; background:#fff3cd; color:#856404;
+          border:1px solid #ffeeba; padding:6px 10px; border-radius:4px; font-weight:bold; cursor:pointer; font-size:11.5px;
+        ">失敗した注文を再取得</button>
       </div>
     `;
 
     document.body.appendChild(panel);
+    enableDrag(panel, document.getElementById('amz-drag-handle'));
 
     document.getElementById('amz-fetch-depth').value = settings.fetchDepth;
     document.getElementById('amz-date-from').value = settings.dateFrom;
@@ -291,10 +398,25 @@
       }
     });
 
-    document.getElementById('amz-start-btn').addEventListener('click', startBatchProcess);
-    document.getElementById('amz-cancel-btn').addEventListener('click', cancelBatchProcess);
+    document.getElementById('amz-select-all-btn').addEventListener('click', () => {
+      document.querySelectorAll('#amz-preview-list .amz-item-check').forEach((cb) => (cb.checked = true));
+      document.getElementById('amz-selected-count').textContent = String(scannedItems.length);
+      document.getElementById('amz-download-selected-btn').disabled = scannedItems.length === 0;
+      document.getElementById('amz-download-selected-btn').style.opacity = scannedItems.length === 0 ? '0.5' : '1';
+    });
 
-    // ストレージ変更（ポップアップからのテスト切替など）を即時反映
+    document.getElementById('amz-deselect-all-btn').addEventListener('click', () => {
+      document.querySelectorAll('#amz-preview-list .amz-item-check').forEach((cb) => (cb.checked = false));
+      document.getElementById('amz-selected-count').textContent = '0';
+      document.getElementById('amz-download-selected-btn').disabled = true;
+      document.getElementById('amz-download-selected-btn').style.opacity = '0.5';
+    });
+
+    document.getElementById('amz-scan-btn').addEventListener('click', scanOrdersProcess);
+    document.getElementById('amz-download-selected-btn').addEventListener('click', startDownloadSelected);
+    document.getElementById('amz-cancel-btn').addEventListener('click', cancelBatchProcess);
+    document.getElementById('amz-retry-btn').addEventListener('click', retryFailedItems);
+
     chrome.storage.onChanged.addListener((changes) => {
       if (changes.devProMode || changes.monthlyUsage) {
         fetchLicenseStatus().then(renderLicenseUI);
@@ -302,7 +424,6 @@
     });
   }
 
-  // カード内の領収書ポップオーバーから適格請求書PDFリンクを取得
   async function resolveInvoicePdfUrl(card) {
     const directPdf = card.querySelector('a[href*="/documents/download/"]');
     if (directPdf) {
@@ -333,9 +454,11 @@
     return null;
   }
 
-  // ドキュメントから注文情報を抽出
+  // Amazon個人・Amazon Business 両対応の注文カード抽出
   async function extractOrdersFromDoc(doc, { preferInvoicePdf, filenameTemplate }) {
-    let cards = doc.querySelectorAll('.order-card, [data-component-type="order-card"], .js-order-card, .a-box-group.order');
+    let cards = doc.querySelectorAll(
+      '.order-card, [data-component-type="order-card"], .js-order-card, .a-box-group.order, .ab-order-card'
+    );
     if (cards.length === 0) {
       cards = doc.querySelectorAll('.a-box-group');
     }
@@ -410,7 +533,6 @@
     return items;
   }
 
-  // 次ページURLを取得
   function getNextPageUrl(doc) {
     const nextLink = doc.querySelector('ul.a-pagination li.a-last:not(.a-disabled) a');
     if (!nextLink) return null;
@@ -421,12 +543,17 @@
 
   function setRunningState(running) {
     isProcessing = running;
-    const startBtn = document.getElementById('amz-start-btn');
+    const scanBtn = document.getElementById('amz-scan-btn');
+    const dlBtn = document.getElementById('amz-download-selected-btn');
     const cancelBtn = document.getElementById('amz-cancel-btn');
     const progressWrap = document.getElementById('amz-progress-wrap');
 
-    startBtn.disabled = running;
-    startBtn.style.opacity = running ? '0.6' : '1';
+    scanBtn.disabled = running;
+    scanBtn.style.opacity = running ? '0.6' : '1';
+    if (dlBtn) {
+      dlBtn.disabled = running;
+      dlBtn.style.opacity = running ? '0.6' : '1';
+    }
     cancelBtn.style.display = running ? 'block' : 'none';
     progressWrap.style.display = running ? 'block' : 'none';
   }
@@ -440,21 +567,13 @@
     }
   }
 
-  // 一括取得開始
-  async function startBatchProcess() {
+  // ステップ1: 注文をスキャンしてチェックボックス一覧を表示
+  async function scanOrdersProcess() {
     if (isProcessing) return;
 
-    const license = await fetchLicenseStatus();
-    renderLicenseUI(license);
-
-    if (!license.isPaid && license.remaining <= 0) {
-      if (confirm(`今月の無料枠（${license.monthlyLimit}件）を使い切りました。\nProプランにアップグレードしますか？`)) {
-        openUpgradePage();
-      }
-      return;
-    }
-
     isCancelled = false;
+    lastFailedItems = [];
+    document.getElementById('amz-retry-btn').style.display = 'none';
     setRunningState(true);
 
     const { downloadedOrderIds } = await loadSettings();
@@ -466,7 +585,6 @@
     const filenameTemplate = document.getElementById('amz-filename-tpl').value.trim() || DEFAULT_SETTINGS.filenameTemplate;
     const preferInvoicePdf = document.getElementById('amz-prefer-invoice').checked;
     const skipDownloaded = document.getElementById('amz-skip-downloaded').checked;
-    const exportCsv = license.isPaid && document.getElementById('amz-export-csv').checked;
 
     const allItems = [];
     let skippedCount = 0;
@@ -475,7 +593,7 @@
 
     try {
       while (currentPage <= maxPages && !isCancelled) {
-        updateStatus(`注文一覧を解析中 (${currentPage}ページ目)...`, 0);
+        updateStatus(`注文一覧をスキャン中 (${currentPage}ページ目)...`, 0);
 
         const pageOrders = await extractOrdersFromDoc(currentDoc, {
           preferInvoicePdf,
@@ -520,48 +638,88 @@
         currentPage++;
       }
 
+      setRunningState(false);
+
       if (isCancelled) {
-        updateStatus('処理を中止しました');
-        setRunningState(false);
+        updateStatus('スキャンを中止しました');
         return;
       }
 
-      if (allItems.length === 0) {
+      scannedItems = allItems;
+      renderPreviewList(scannedItems);
+
+      if (scannedItems.length === 0) {
         const msg = skippedCount > 0
           ? `新規対象の注文はありませんでした（取得済みスキップ: ${skippedCount}件）`
           : '条件に一致する注文が見つかりませんでした。';
-        alert(msg);
         updateStatus(msg);
-        setRunningState(false);
-        return;
+      } else {
+        updateStatus(`${scannedItems.length}件見つかりました。対象を選んで保存を押してください。`);
       }
-
-      let targetItems = allItems;
-      if (!license.isPaid && allItems.length > license.remaining) {
-        const proceed = confirm(
-          `対象注文が ${allItems.length}件 見つかりましたが、今月の無料枠は残り ${license.remaining}件 です。\n` +
-          `OK: 最初の ${license.remaining}件 のみ保存する\n` +
-          `キャンセル: Proプラン（無制限）の案内を開く`
-        );
-        if (!proceed) {
-          openUpgradePage();
-          updateStatus('待機中');
-          setRunningState(false);
-          return;
-        }
-        targetItems = allItems.slice(0, license.remaining);
-      }
-
-      updateStatus(`${targetItems.length}件のPDF生成を開始します...`, 0);
-      chrome.runtime.sendMessage({
-        action: 'START_DOWNLOAD',
-        payload: { items: targetItems, exportCsv }
-      });
     } catch (err) {
-      console.error('[Amazon領収書PDF] 収集エラー:', err);
+      console.error('[Amazon領収書PDF] スキャンエラー:', err);
       updateStatus(`エラー: ${err.message}`);
       setRunningState(false);
     }
+  }
+
+  // ステップ2: チェックされた注文のみPDF保存を開始
+  async function startDownloadSelected() {
+    if (isProcessing) return;
+
+    const checkedIndices = Array.from(document.querySelectorAll('#amz-preview-list .amz-item-check:checked'))
+      .map((cb) => parseInt(cb.getAttribute('data-index'), 10));
+    const selectedItems = checkedIndices.map((idx) => scannedItems[idx]).filter(Boolean);
+
+    if (!selectedItems.length) {
+      alert('保存する注文を1件以上選択してください。');
+      return;
+    }
+
+    await launchDownload(selectedItems);
+  }
+
+  async function retryFailedItems() {
+    if (isProcessing || !lastFailedItems.length) return;
+    await launchDownload([...lastFailedItems]);
+  }
+
+  async function launchDownload(itemsToDownload) {
+    const license = await fetchLicenseStatus();
+    renderLicenseUI(license);
+
+    if (!license.isPaid && license.remaining <= 0) {
+      if (confirm(`今月の無料枠（${license.monthlyLimit}件）を使い切りました。\nProプランにアップグレードしますか？`)) {
+        openUpgradePage();
+      }
+      return;
+    }
+
+    let targetItems = itemsToDownload;
+    if (!license.isPaid && itemsToDownload.length > license.remaining) {
+      const proceed = confirm(
+        `選択された注文は ${itemsToDownload.length}件 ですが、今月の無料枠は残り ${license.remaining}件 です。\n` +
+        `OK: 最初の ${license.remaining}件 のみ保存する\n` +
+        `キャンセル: Proプラン（無制限）の案内を開く`
+      );
+      if (!proceed) {
+        openUpgradePage();
+        return;
+      }
+      targetItems = itemsToDownload.slice(0, license.remaining);
+    }
+
+    lastFailedItems = [];
+    document.getElementById('amz-retry-btn').style.display = 'none';
+    isCancelled = false;
+    setRunningState(true);
+    updateStatus(`${targetItems.length}件のPDF生成を開始します...`, 0);
+
+    const exportCsv = license.isPaid && document.getElementById('amz-export-csv').checked;
+    chrome.runtime.sendMessage({
+      action: 'START_DOWNLOAD',
+      payload: { items: targetItems, exportCsv }
+    });
   }
 
   function cancelBatchProcess() {
@@ -572,7 +730,7 @@
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message.action === 'PROGRESS_UPDATE') {
-      const { current, total, statusText, done, historyCount, licenseStatus } = message;
+      const { current, total, statusText, done, historyCount, licenseStatus, failedItems } = message;
       const percent = total > 0 ? Math.round((current / total) * 100) : 0;
       updateStatus(statusText, percent);
       if (typeof historyCount === 'number') {
@@ -584,6 +742,12 @@
       }
       if (done) {
         setRunningState(false);
+        if (Array.isArray(failedItems) && failedItems.length > 0) {
+          lastFailedItems = failedItems;
+          const retryBtn = document.getElementById('amz-retry-btn');
+          retryBtn.textContent = `失敗した ${failedItems.length}件 を再取得する`;
+          retryBtn.style.display = 'block';
+        }
       }
     }
   });

@@ -241,6 +241,35 @@ async function downloadDirectPdf(url, filename) {
   await downloadDataUrl(`data:application/pdf;base64,${base64}`, filename);
 }
 
+// タブを使って印刷用ページからPDFを生成・保存
+async function printTabToPdf(tabId, item) {
+  const loadPromise = waitForTabComplete(tabId);
+  await chrome.tabs.update(tabId, { url: item.url });
+  const updatedTab = await loadPromise;
+
+  if (updatedTab.url && updatedTab.url.includes('/ap/signin')) {
+    throw new Error('Amazonのログインセッションが切れました。再ログインしてください。');
+  }
+
+  await new Promise((r) => setTimeout(r, 800));
+  if (isCancelled) return false;
+
+  const pdfResult = await chrome.debugger.sendCommand({ tabId }, 'Page.printToPDF', {
+    printBackground: true,
+    preferCSSPageSize: true,
+    paperWidth: 8.27,
+    paperHeight: 11.69,
+    marginTop: 0.4,
+    marginBottom: 0.4,
+    marginLeft: 0.4,
+    marginRight: 0.4
+  });
+
+  const pdfDataUrl = `data:application/pdf;base64,${pdfResult.data}`;
+  await downloadDataUrl(pdfDataUrl, item.filename);
+  return true;
+}
+
 // PDF一括生成メイン処理
 async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
   isRunning = true;
@@ -250,6 +279,7 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
   let debuggerAttached = false;
   let successCount = 0;
   const completedItems = [];
+  const failedItems = [];
 
   try {
     // サーバー側（background）でもライセンス・無料枠を厳密チェック
@@ -320,39 +350,25 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
       }
 
       if (!saved && workerTab) {
-        try {
-          const tabId = workerTab.id;
-          const loadPromise = waitForTabComplete(tabId);
-          await chrome.tabs.update(tabId, { url: item.url });
-          const updatedTab = await loadPromise;
-
-          if (updatedTab.url && updatedTab.url.includes('/ap/signin')) {
-            throw new Error('Amazonのログインセッションが切れました。再ログインしてください。');
-          }
-
-          await new Promise((r) => setTimeout(r, 800));
+        // 一時的なネットワークエラー等に備えて最大2回（初回＋リトライ1回）試行
+        for (let attempt = 1; attempt <= 2; attempt++) {
           if (isCancelled) break;
-
-          const pdfResult = await chrome.debugger.sendCommand({ tabId }, 'Page.printToPDF', {
-            printBackground: true,
-            preferCSSPageSize: true,
-            paperWidth: 8.27,
-            paperHeight: 11.69,
-            marginTop: 0.4,
-            marginBottom: 0.4,
-            marginLeft: 0.4,
-            marginRight: 0.4
-          });
-
-          const pdfDataUrl = `data:application/pdf;base64,${pdfResult.data}`;
-          await downloadDataUrl(pdfDataUrl, item.filename);
-          saved = true;
-          item.pdfType = '印刷生成PDF';
-        } catch (err) {
-          console.error(`[PDF生成失敗] ${item.orderId}:`, err);
-          if (err.message.includes('ログインセッション')) {
-            notifyProgress(sourceTabId, i, items.length, err.message, true);
-            return;
+          try {
+            const ok = await printTabToPdf(workerTab.id, item);
+            if (ok) {
+              saved = true;
+              item.pdfType = '印刷生成PDF';
+            }
+            break;
+          } catch (err) {
+            console.error(`[PDF生成失敗 attempt=${attempt}] ${item.orderId}:`, err);
+            if (err.message.includes('ログインセッション')) {
+              notifyProgress(sourceTabId, i, items.length, err.message, true);
+              return;
+            }
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 1200));
+            }
           }
         }
       }
@@ -360,6 +376,8 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
       if (saved) {
         successCount++;
         completedItems.push(item);
+      } else if (!isCancelled) {
+        failedItems.push(item);
       }
 
       if (i < items.length - 1 && !isCancelled) {
@@ -398,11 +416,14 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
 
     const finalMsg = isCancelled
       ? `中止しました (${successCount}/${items.length}件 保存済み)`
-      : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
+      : failedItems.length > 0
+        ? `完了: ${successCount}/${items.length}件保存（失敗: ${failedItems.length}件）`
+        : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
 
     notifyProgress(sourceTabId, items.length, items.length, finalMsg, true, {
       historyCount,
-      licenseStatus: latestLicense
+      licenseStatus: latestLicense,
+      failedItems
     });
 
     chrome.notifications.create({
