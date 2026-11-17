@@ -746,69 +746,88 @@
     setRunningState(true);
     updateStatus(`スキャン中 (${state.currentPage}ページ目 / 現在 ${state.items.length}件)...`, 0);
 
-    const downloadedSet = new Set(state.downloadedOrderIds || []);
-    const pageOrders = extractOrdersFromDoc(document, {
-      preferInvoicePdf: state.preferInvoicePdf,
-      filenameTemplate: state.filenameTemplate
-    });
+    try {
+      const downloadedSet = new Set(state.downloadedOrderIds || []);
+      const pageOrders = extractOrdersFromDoc(document, {
+        preferInvoicePdf: state.preferInvoicePdf,
+        filenameTemplate: state.filenameTemplate
+      });
 
-    let reachedBeforeDateFrom = false;
-    for (const order of pageOrders) {
-      if (order.dateIso) {
-        if (state.dateTo && order.dateIso > state.dateTo) continue;
-        if (state.dateFrom && order.dateIso < state.dateFrom) {
-          reachedBeforeDateFrom = true;
+      let datedCount = 0;
+      let olderThanFromCount = 0;
+
+      for (const order of pageOrders) {
+        if (order.dateIso) {
+          datedCount++;
+          if (state.dateTo && order.dateIso > state.dateTo) continue;
+          if (state.dateFrom && order.dateIso < state.dateFrom) {
+            olderThanFromCount++;
+            continue;
+          }
+        }
+
+        if (state.skipDownloaded && downloadedSet.has(order.orderId)) {
+          state.skippedCount++;
           continue;
+        }
+
+        if (!state.items.some((x) => x.orderId === order.orderId)) {
+          state.items.push(order);
         }
       }
 
-      if (state.skipDownloaded && downloadedSet.has(order.orderId)) {
-        state.skippedCount++;
-        continue;
+      // ページ内の日付付き注文が「すべて」開始日より古い場合のみ、以降のページ巡回を終了
+      const allOlderThanFrom = Boolean(state.dateFrom) && datedCount > 0 && olderThanFromCount === datedCount;
+      const nextUrl = getNextPageUrl(document, state.currentPage);
+      if (!allOlderThanFrom && state.currentPage < state.maxPages && nextUrl && !isCancelled) {
+        const nextState = {
+          ...state,
+          currentPage: state.currentPage + 1
+        };
+        updateStatus(`次ページへ移動中 (${state.currentPage}ページ目完了: ${state.items.length}件)...`, 0);
+        chrome.storage.local.set({ amzScanState: nextState }, () => {
+          setTimeout(() => {
+            if (!isCancelled) {
+              window.location.href = nextUrl;
+            }
+          }, 1000);
+        });
+        return;
       }
 
-      if (!state.items.some((x) => x.orderId === order.orderId)) {
-        state.items.push(order);
+      // スキャン完了
+      chrome.storage.local.remove('amzScanState');
+      setRunningState(false);
+
+      scannedItems = state.items;
+      renderPreviewList(scannedItems);
+
+      if (scannedItems.length === 0) {
+        const msg = state.skippedCount > 0
+          ? `新規対象の注文はありませんでした（取得済みスキップ: ${state.skippedCount}件）`
+          : '条件に一致する注文が見つかりませんでした。';
+        updateStatus(msg);
+      } else {
+        updateStatus(`${scannedItems.length}件見つかりました。対象を選んで保存を押してください。`);
       }
-    }
-
-    const nextUrl = getNextPageUrl(document, state.currentPage);
-    if (!reachedBeforeDateFrom && state.currentPage < state.maxPages && nextUrl && !isCancelled) {
-      const nextState = {
-        ...state,
-        currentPage: state.currentPage + 1
-      };
-      updateStatus(`次ページへ移動中 (${state.currentPage}ページ目完了: ${state.items.length}件)...`, 0);
-      chrome.storage.local.set({ amzScanState: nextState }, () => {
-        setTimeout(() => {
-          if (!isCancelled) {
-            window.location.href = nextUrl;
-          }
-        }, 1000);
-      });
-      return;
-    }
-
-    // スキャン完了
-    chrome.storage.local.remove('amzScanState');
-    setRunningState(false);
-
-    scannedItems = state.items;
-    renderPreviewList(scannedItems);
-
-    if (scannedItems.length === 0) {
-      const msg = state.skippedCount > 0
-        ? `新規対象の注文はありませんでした（取得済みスキップ: ${state.skippedCount}件）`
-        : '条件に一致する注文が見つかりませんでした。';
-      updateStatus(msg);
-    } else {
-      updateStatus(`${scannedItems.length}件見つかりました。対象を選んで保存を押してください。`);
+    } catch (err) {
+      console.error('[Amazon領収書PDF] スキャンエラー:', err);
+      chrome.storage.local.remove('amzScanState');
+      setRunningState(false);
+      updateStatus(`エラー: ${err.message}`);
     }
   }
 
   // ステップ1: 注文をスキャンしてチェックボックス一覧を表示
   async function scanOrdersProcess() {
     if (isProcessing) return;
+
+    const dateFrom = document.getElementById('amz-date-from').value;
+    const dateTo = document.getElementById('amz-date-to').value;
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      alert('開始日は終了日より前の日付を指定してください。');
+      return;
+    }
 
     lastFailedItems = [];
     document.getElementById('amz-retry-btn').style.display = 'none';
