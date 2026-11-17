@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Amazon領収書一括ダウンローダー",
+  "version": "1.0.0",
+  "description": "Amazon.co.jpの注文履歴から領収書・適格請求書を複数ページ巡回してPDF一括保存＆CSV出力します",
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": [
+    "downloads",
+    "storage",
+    "tabs",
+    "debugger",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.amazon.co.jp/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.co.jp/your-orders/*",
+        "https://www.amazon.co.jp/gp/your-account/order-history*",
+        "https://www.amazon.co.jp/gp/css/order-history*"
+      ],
+      "js": ["content.js"]
+    }
+  ]
+}

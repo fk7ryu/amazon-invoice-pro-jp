@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Amazon領収書一括ダウンローダー | インボイスPDF・CSV自動保存ツール</title>
+  <style>
+    :root {
+      --brand: #FF9900;
+      --dark: #111827;
+      --text: #374151;
+      --bg: #f9fafb;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.7;
+    }
+    header {
+      background: var(--dark);
+      color: #fff;
+      padding: 48px 20px;
+      text-align: center;
+    }
+    header h1 {
+      margin: 0 0 12px;
+      font-size: 28px;
+    }
+    header p {
+      margin: 0 auto;
+      max-width: 640px;
+      color: #d1d5db;
+      font-size: 15px;
+    }
+    .badge {
+      display: inline-block;
+      background: var(--brand);
+      color: #111;
+      font-weight: bold;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-bottom: 14px;
+    }
+    main {
+      max-width: 860px;
+      margin: 32px auto;
+      padding: 0 20px;
+    }
+    section {
+      background: #fff;
+      border-radius: 10px;
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    }
+    h2 {
+      margin-top: 0;
+      font-size: 20px;
+      color: var(--dark);
+      border-left: 4px solid var(--brand);
+      padding-left: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .box {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      background: #fafafa;
+    }
+    .box h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      color: var(--dark);
+    }
+    .price {
+      font-size: 24px;
+      font-weight: bold;
+      color: var(--dark);
+      margin: 8px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid #e5e7eb;
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      width: 30%;
+      color: var(--dark);
+    }
+    footer {
+      text-align: center;
+      padding: 24px 20px 40px;
+      font-size: 13px;
+      color: #6b7280;
+    }
+    a {
+      color: #b45309;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="badge">Google Chrome 拡張機能</div>
+    <h1>Amazon領収書一括ダウンローダー</h1>
+    <p>確定申告・月次経理・経費精算のために、Amazon.co.jpの注文履歴から領収書・適格請求書（インボイス）をPDFで一括保存＆自動リネームする業務効率化ツールです。</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>主な機能</h2>
+      <div class="grid">
+        <div class="box">
+          <h3>領収書・適格請求書をPDF一括保存</h3>
+          <p>指定したページ数・期間（開始日〜終了日）の注文を自動巡回し、A4サイズのPDFとして一括ダウンロードします。適格請求書（インボイス）の原本PDFがある注文は原本を優先取得します。</p>
+        </div>
+        <div class="box">
+          <h3>経理ソフト向け自動リネーム</h3>
+          <p>「20261117_3980円_Amazon_注文番号.pdf」のように日付・金額・注文番号で自動整形。年別フォルダ分けや変数カスタマイズにも対応しています。</p>
+        </div>
+        <div class="box">
+          <h3>注文一覧CSV出力＆重複スキップ</h3>
+          <p>ダウンロードした全件の注文日・金額・商品名をまとめたUTF-8（BOM付き）CSVを同時出力。取得済み注文のスキップ機能で毎月の作業も快適です。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>料金プラン</h2>
+      <div class="grid">
+        <div class="box">
+          <h3>無料プラン</h3>
+          <div class="price">0円</div>
+          <p>月10件までPDF一括保存が可能（毎月自動リセット）。まずは動作をお試しいただけます。</p>
+        </div>
+        <div class="box">
+          <h3>Proプラン（買い切り / 月額）</h3>
+          <div class="price">2,980円（買い切り） / 月額490円</div>
+          <p>PDF一括保存が無制限になり、注文一覧CSVの同時出力機能もすべてご利用いただけます。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>特定商取引法に基づく表記</h2>
+      <table>
+        <tr>
+          <th>サービス名</th>
+          <td>Amazon領収書一括ダウンローダー（Google Chrome拡張機能）</td>
+        </tr>
+        <tr>
+          <th>販売価格</th>
+          <td>Proプラン：買い切り 2,980円（税込） / 月額プラン 490円（税込）</td>
+        </tr>
+        <tr>
+          <th>お支払い方法</th>
+          <td>クレジットカード決済（ExtensionPay / Stripe経由）</td>
+        </tr>
+        <tr>
+          <th>引渡時期</th>
+          <td>決済完了後、即時にProプラン機能が有効化されます。</td>
+        </tr>
+        <tr>
+          <th>返品・キャンセル</th>
+          <td>デジタルコンテンツの性質上、決済完了後の返金には原則対応しておりません。月額プランはStripeカスタマーポータルよりいつでも解約可能です。</td>
+        </tr>
+        <tr>
+          <th>運営者・連絡先</th>
+          <td>連絡先メールアドレス: （ここにサポート用メールアドレスを記載してください）<br />※ 所在地・電話番号については、ご請求があった場合遅滞なく開示いたします。</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    <p><a href="./privacy.html">プライバシーポリシー</a></p>
+    <p>&copy; 2026 Amazon領収書一括ダウンローダー</p>
+  </footer>
+</body>
+</html>
