@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Amazon領収書一括ダウンローダー",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Amazon.co.jpの注文履歴から領収書・適格請求書を複数ページ巡回してPDF一括保存＆CSV出力します",
   "icons": {
     "128": "icons/icon128.png"

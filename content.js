@@ -126,9 +126,11 @@
     const safeTitle = sanitizeFilePart(item.title || '商品');
     const year = item.date !== '不明日付' ? item.date.slice(0, 4) : '不明年';
     const month = item.date !== '不明日付' ? item.date.slice(4, 6) : '00';
+    const dateIso = item.dateIso || item.date;
 
     let name = (template || DEFAULT_SETTINGS.filenameTemplate)
       .replace(/\{date\}/g, item.date)
+      .replace(/\{dateIso\}/g, dateIso)
       .replace(/\{year\}/g, year)
       .replace(/\{month\}/g, month)
       .replace(/\{price\}/g, item.priceStr)
@@ -195,12 +197,68 @@
       .replace(/"/g, '&quot;');
   }
 
+  // パネル用スタイルを注入（ホバー・スクロールバー等のデザイン磨き込み）
+  function injectPanelStyles() {
+    if (document.getElementById('amz-invoice-style')) return;
+    const style = document.createElement('style');
+    style.id = 'amz-invoice-style';
+    style.textContent = `
+      #amz-invoice-panel * { box-sizing: border-box; }
+      #amz-invoice-panel input:focus,
+      #amz-invoice-panel select:focus {
+        outline: none;
+        border-color: #FF9900 !important;
+        box-shadow: 0 0 0 2px rgba(255, 153, 0, 0.2);
+      }
+      #amz-invoice-panel .amz-primary-btn {
+        background: linear-gradient(180deg, #ffae2b 0%, #ff9900 100%) !important;
+        transition: filter 0.15s, transform 0.05s;
+      }
+      #amz-invoice-panel .amz-primary-btn:hover:not(:disabled) {
+        filter: brightness(0.96);
+      }
+      #amz-invoice-panel .amz-primary-btn:active:not(:disabled) {
+        transform: translateY(1px);
+      }
+      #amz-preview-list::-webkit-scrollbar { width: 6px; }
+      #amz-preview-list::-webkit-scrollbar-thumb {
+        background: #d1d5db; border-radius: 3px;
+      }
+      #amz-preview-list .amz-item-row:hover {
+        background: #fffbeb;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // 選択中の件数と合計金額をリアルタイム更新
+  function updateSelectionSummary() {
+    const listEl = document.getElementById('amz-preview-list');
+    const countEl = document.getElementById('amz-selected-count');
+    const totalEl = document.getElementById('amz-selected-total');
+    const downloadBtn = document.getElementById('amz-download-selected-btn');
+    if (!listEl) return;
+
+    const checkedBoxes = Array.from(listEl.querySelectorAll('.amz-item-check:checked'));
+    const totalYen = checkedBoxes.reduce((sum, cb) => {
+      const idx = parseInt(cb.getAttribute('data-index'), 10);
+      const item = scannedItems[idx];
+      return sum + (item ? parseInt(item.priceNum || '0', 10) || 0 : 0);
+    }, 0);
+
+    if (countEl) countEl.textContent = String(checkedBoxes.length);
+    if (totalEl) totalEl.textContent = `¥${totalYen.toLocaleString('ja-JP')}`;
+    if (downloadBtn) {
+      downloadBtn.disabled = checkedBoxes.length === 0;
+      downloadBtn.style.opacity = checkedBoxes.length === 0 ? '0.5' : '1';
+    }
+  }
+
   // スキャン結果のチェックボックス一覧を描画
   function renderPreviewList(items) {
     const wrap = document.getElementById('amz-preview-wrap');
     const listEl = document.getElementById('amz-preview-list');
-    const countEl = document.getElementById('amz-selected-count');
-    const downloadBtn = document.getElementById('amz-download-selected-btn');
+    const filterInput = document.getElementById('amz-filter-input');
 
     if (!wrap || !listEl) return;
     if (!items.length) {
@@ -208,39 +266,38 @@
       return;
     }
 
+    if (filterInput) filterInput.value = '';
+
     listEl.innerHTML = items
       .map(
         (it, idx) => `
-        <label style="display:flex; align-items:flex-start; gap:6px; padding:4px 2px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size:11px;">
+        <label class="amz-item-row" data-search="${escapeHtml((it.title + ' ' + it.orderId + ' ' + (it.dateIso || it.date)).toLowerCase())}" style="
+          display:flex; align-items:flex-start; gap:6px; padding:5px 4px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size:11px;
+        ">
           <input type="checkbox" class="amz-item-check" data-index="${idx}" checked style="margin-top:2px;" />
           <div style="flex:1; min-width:0;">
-            <div style="font-weight:bold; color:#111;">${escapeHtml(it.dateIso || it.date)} / ${escapeHtml(it.priceStr)}</div>
+            <div style="display:flex; justify-content:space-between; font-weight:bold; color:#111;">
+              <span>${escapeHtml(it.dateIso || it.date)}</span>
+              <span>${escapeHtml(it.priceStr)}</span>
+            </div>
             <div style="color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(it.title || it.orderId)}</div>
           </div>
         </label>`
       )
       .join('');
 
-    const updateSelectedCount = () => {
-      const checked = listEl.querySelectorAll('.amz-item-check:checked').length;
-      if (countEl) countEl.textContent = String(checked);
-      if (downloadBtn) {
-        downloadBtn.disabled = checked === 0;
-        downloadBtn.style.opacity = checked === 0 ? '0.5' : '1';
-      }
-    };
-
     listEl.querySelectorAll('.amz-item-check').forEach((cb) => {
-      cb.addEventListener('change', updateSelectedCount);
+      cb.addEventListener('change', updateSelectionSummary);
     });
 
     wrap.style.display = 'block';
-    updateSelectedCount();
+    updateSelectionSummary();
   }
 
   // 操作パネルを画面左上に挿入
   async function injectControlUI() {
     if (document.getElementById('amz-invoice-panel')) return;
+    injectPanelStyles();
 
     const [{ settings, downloadedOrderIds, panelPos }, license] = await Promise.all([
       loadSettings(),
@@ -313,8 +370,15 @@
         <details id="amz-advanced-details" style="margin-bottom:8px; border:1px solid #eee; border-radius:4px; padding:6px 8px; background:#fafafa;">
           <summary style="cursor:pointer; font-size:11.5px; color:#333; font-weight:bold;">詳細設定（ファイル名・インボイス等）</summary>
           <div style="margin-top:8px;">
-            <label style="display:block; margin-bottom:3px; color:#444; font-size:11px;">ファイル名形式（変数: {date} {price} {orderId} {title} {year}）</label>
-            <input type="text" id="amz-filename-tpl" style="width:100%; box-sizing:border-box; padding:4px 6px; border:1px solid #ccc; border-radius:4px; font-size:11.5px; margin-bottom:8px;" />
+            <label style="display:block; margin-bottom:3px; color:#444; font-size:11px;">ファイル名プリセット</label>
+            <select id="amz-filename-preset" style="width:100%; padding:4px; border:1px solid #ccc; border-radius:4px; font-size:11.5px; margin-bottom:6px;">
+              <option value="custom">カスタム（下の入力欄を編集）</option>
+              <option value="{date}_{price}_Amazon_{orderId}">標準（日付_金額_Amazon_注文番号）</option>
+              <option value="{year}/{year}-{month}/{date}_{price}_{orderId}">年/月別フォルダ分け</option>
+              <option value="{dateIso}_Amazon_{title}_{price}">freee・MF向け（日付_商品名_金額）</option>
+            </select>
+            <label style="display:block; margin-bottom:3px; color:#444; font-size:11px;">ファイル名形式（{date} {dateIso} {price} {orderId} {title} {year}）</label>
+            <input type="text" id="amz-filename-tpl" style="width:100%; padding:4px 6px; border:1px solid #ccc; border-radius:4px; font-size:11.5px; margin-bottom:8px;" />
 
             <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11.5px; cursor:pointer;">
               <input type="checkbox" id="amz-prefer-invoice" />
@@ -337,17 +401,20 @@
           </div>
         </details>
 
-        <div id="amz-preview-wrap" style="display:none; margin-bottom:8px; border:1px solid #ddd; border-radius:4px; padding:6px;">
+        <div id="amz-preview-wrap" style="display:none; margin-bottom:8px; border:1px solid #ddd; border-radius:6px; padding:7px; background:#fff;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; font-size:11px;">
-            <span style="font-weight:bold;">対象注文（<span id="amz-selected-count">0</span>件選択中）</span>
+            <span style="font-weight:bold;">対象: <span id="amz-selected-count">0</span>件（<span id="amz-selected-total">¥0</span>）</span>
             <div>
               <button id="amz-select-all-btn" type="button" style="background:none; border:none; color:#0066c0; cursor:pointer; font-size:11px; padding:0 4px;">全選択</button>
               <button id="amz-deselect-all-btn" type="button" style="background:none; border:none; color:#0066c0; cursor:pointer; font-size:11px; padding:0 4px;">解除</button>
             </div>
           </div>
-          <div id="amz-preview-list" style="max-height:140px; overflow-y:auto; border-top:1px solid #eee;"></div>
-          <button id="amz-download-selected-btn" type="button" style="
-            width:100%; margin-top:6px; background:#FF9900; color:#111; font-weight:bold;
+          <input type="text" id="amz-filter-input" placeholder="商品名・注文番号で絞り込み..." style="
+            width:100%; padding:4px 6px; margin-bottom:5px; border:1px solid #ddd; border-radius:4px; font-size:11px;
+          " />
+          <div id="amz-preview-list" style="max-height:150px; overflow-y:auto; border-top:1px solid #eee;"></div>
+          <button id="amz-download-selected-btn" type="button" class="amz-primary-btn" style="
+            width:100%; margin-top:6px; color:#111; font-weight:bold;
             border:1px solid #a88734; padding:7px 10px; border-radius:4px; cursor:pointer;
           ">選択した注文をPDF保存</button>
         </div>
@@ -361,8 +428,8 @@
         <div id="amz-status-text" style="color:#555; font-size:11.5px; margin-bottom:8px; min-height:18px; line-height:1.4;">待機中</div>
 
         <div style="display:flex; gap:6px;">
-          <button id="amz-scan-btn" style="
-            flex:1; background:#FF9900; color:#111; font-weight:bold;
+          <button id="amz-scan-btn" class="amz-primary-btn" style="
+            flex:1; color:#111; font-weight:bold;
             border:1px solid #a88734; padding:7px 10px; border-radius:4px; cursor:pointer;
           ">注文をスキャン</button>
           <button id="amz-cancel-btn" style="
@@ -389,6 +456,12 @@
     document.getElementById('amz-skip-downloaded').checked = settings.skipDownloaded;
     document.getElementById('amz-export-csv').checked = settings.exportCsv;
 
+    // プリセットドロップダウンとテキスト入力を同期
+    const presetEl = document.getElementById('amz-filename-preset');
+    const tplEl = document.getElementById('amz-filename-tpl');
+    const matchPreset = Array.from(presetEl.options).some((opt) => opt.value === settings.filenameTemplate);
+    presetEl.value = matchPreset ? settings.filenameTemplate : 'custom';
+
     renderLicenseUI(license);
 
     const syncSettings = () => {
@@ -396,12 +469,24 @@
         fetchDepth: document.getElementById('amz-fetch-depth').value,
         dateFrom: document.getElementById('amz-date-from').value,
         dateTo: document.getElementById('amz-date-to').value,
-        filenameTemplate: document.getElementById('amz-filename-tpl').value.trim() || DEFAULT_SETTINGS.filenameTemplate,
+        filenameTemplate: tplEl.value.trim() || DEFAULT_SETTINGS.filenameTemplate,
         preferInvoicePdf: document.getElementById('amz-prefer-invoice').checked,
         skipDownloaded: document.getElementById('amz-skip-downloaded').checked,
         exportCsv: document.getElementById('amz-export-csv').checked
       });
     };
+
+    presetEl.addEventListener('change', () => {
+      if (presetEl.value !== 'custom') {
+        tplEl.value = presetEl.value;
+        syncSettings();
+      }
+    });
+
+    tplEl.addEventListener('input', () => {
+      const matched = Array.from(presetEl.options).some((opt) => opt.value === tplEl.value.trim());
+      presetEl.value = matched ? tplEl.value.trim() : 'custom';
+    });
 
     [
       'amz-fetch-depth',
@@ -434,18 +519,32 @@
       }
     });
 
+    document.getElementById('amz-filter-input').addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll('#amz-preview-list .amz-item-row').forEach((row) => {
+        const hay = row.getAttribute('data-search') || '';
+        row.style.display = !q || hay.includes(q) ? 'flex' : 'none';
+      });
+    });
+
     document.getElementById('amz-select-all-btn').addEventListener('click', () => {
-      document.querySelectorAll('#amz-preview-list .amz-item-check').forEach((cb) => (cb.checked = true));
-      document.getElementById('amz-selected-count').textContent = String(scannedItems.length);
-      document.getElementById('amz-download-selected-btn').disabled = scannedItems.length === 0;
-      document.getElementById('amz-download-selected-btn').style.opacity = scannedItems.length === 0 ? '0.5' : '1';
+      document.querySelectorAll('#amz-preview-list .amz-item-row').forEach((row) => {
+        if (row.style.display !== 'none') {
+          const cb = row.querySelector('.amz-item-check');
+          if (cb) cb.checked = true;
+        }
+      });
+      updateSelectionSummary();
     });
 
     document.getElementById('amz-deselect-all-btn').addEventListener('click', () => {
-      document.querySelectorAll('#amz-preview-list .amz-item-check').forEach((cb) => (cb.checked = false));
-      document.getElementById('amz-selected-count').textContent = '0';
-      document.getElementById('amz-download-selected-btn').disabled = true;
-      document.getElementById('amz-download-selected-btn').style.opacity = '0.5';
+      document.querySelectorAll('#amz-preview-list .amz-item-row').forEach((row) => {
+        if (row.style.display !== 'none') {
+          const cb = row.querySelector('.amz-item-check');
+          if (cb) cb.checked = false;
+        }
+      });
+      updateSelectionSummary();
     });
 
     document.getElementById('amz-scan-btn').addEventListener('click', scanOrdersProcess);
