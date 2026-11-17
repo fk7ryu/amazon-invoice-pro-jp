@@ -569,12 +569,46 @@
     return items;
   }
 
-  function getNextPageUrl(doc) {
-    const nextLink = doc.querySelector('ul.a-pagination li.a-last:not(.a-disabled) a');
-    if (!nextLink) return null;
-    const href = nextLink.getAttribute('href');
-    if (!href || href === '#') return null;
-    return new URL(href, 'https://www.amazon.co.jp').href;
+  // 次ページURLを複数のパターンから堅牢に検出
+  function getNextPageUrl(doc, currentPage) {
+    const selectors = [
+      'ul.a-pagination li.a-last:not(.a-disabled) a',
+      '.a-pagination .a-last:not(.a-disabled) a',
+      'a[aria-label*="次へ"]',
+      'a[aria-label*="Next"]'
+    ];
+    for (const sel of selectors) {
+      const el = doc.querySelector(sel);
+      if (el) {
+        const href = el.getAttribute('href');
+        if (href && href !== '#' && !href.startsWith('javascript:')) {
+          return new URL(href, 'https://www.amazon.co.jp').href;
+        }
+      }
+    }
+
+    // テキスト「次へ」または page=N+1 / startIndex=N*10 リンクを検索
+    const nextPageNum = currentPage + 1;
+    const nextStartIndex = currentPage * 10;
+    const links = Array.from(doc.querySelectorAll('a[href]'));
+    for (const a of links) {
+      if (a.closest('.a-disabled')) continue;
+      const href = a.getAttribute('href') || '';
+      if (!href || href === '#' || href.startsWith('javascript:')) continue;
+
+      const text = (a.textContent || '').trim();
+      if (/^次へ/.test(text) || /次へ→?$/.test(text)) {
+        return new URL(href, 'https://www.amazon.co.jp').href;
+      }
+      if (
+        (href.includes('your-orders') || href.includes('order-history')) &&
+        (href.includes(`page=${nextPageNum}`) || href.includes(`startIndex=${nextStartIndex}`))
+      ) {
+        return new URL(href, 'https://www.amazon.co.jp').href;
+      }
+    }
+
+    return null;
   }
 
   function setRunningState(running) {
@@ -657,7 +691,7 @@
           }
         }
 
-        const nextUrl = getNextPageUrl(currentDoc);
+        const nextUrl = getNextPageUrl(currentDoc, currentPage);
         if (reachedBeforeDateFrom || currentPage >= maxPages || !nextUrl || isCancelled) {
           break;
         }
