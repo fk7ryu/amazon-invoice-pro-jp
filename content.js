@@ -100,19 +100,29 @@
   }
 
   async function loadSettings() {
+    if (!isContextValid()) {
+      return { settings: { ...DEFAULT_SETTINGS }, downloadedOrderIds: [], panelPos: null };
+    }
     return new Promise((resolve) => {
-      chrome.storage.local.get(['amzSettings', 'downloadedOrderIds', 'panelPos'], (res) => {
-        resolve({
-          settings: { ...DEFAULT_SETTINGS, ...(res.amzSettings || {}) },
-          downloadedOrderIds: Array.isArray(res.downloadedOrderIds) ? res.downloadedOrderIds : [],
-          panelPos: res.panelPos || null
+      try {
+        chrome.storage.local.get(['amzSettings', 'downloadedOrderIds', 'panelPos'], (res) => {
+          resolve({
+            settings: { ...DEFAULT_SETTINGS, ...((res && res.amzSettings) || {}) },
+            downloadedOrderIds: res && Array.isArray(res.downloadedOrderIds) ? res.downloadedOrderIds : [],
+            panelPos: (res && res.panelPos) || null
+          });
         });
-      });
+      } catch (_) {
+        resolve({ settings: { ...DEFAULT_SETTINGS }, downloadedOrderIds: [], panelPos: null });
+      }
     });
   }
 
   function saveSettings(settings) {
-    chrome.storage.local.set({ amzSettings: settings });
+    if (!isContextValid()) return;
+    try {
+      chrome.storage.local.set({ amzSettings: settings });
+    } catch (_) {}
   }
 
   function sanitizeFilePart(str) {
@@ -835,6 +845,7 @@
     const { downloadedOrderIds } = await loadSettings();
     const initialState = {
       isScanning: true,
+      startedAt: Date.now(),
       currentPage: 1,
       maxPages: parseInt(document.getElementById('amz-fetch-depth').value, 10),
       dateFrom: document.getElementById('amz-date-from').value,
@@ -956,11 +967,17 @@
   });
 
   injectControlUI().then(() => {
-    // 複数ページスキャン途中のページ遷移であれば自動で続きから再開
+    // 複数ページスキャン途中のページ遷移であれば自動で続きから再開（5分以上前の古い状態は破棄）
     if (!isContextValid()) return;
     chrome.storage.local.get(['amzScanState'], (res) => {
-      if (res && res.amzScanState && res.amzScanState.isScanning) {
-        setTimeout(() => runScanStep(res.amzScanState), 600);
+      const state = res && res.amzScanState;
+      if (state && state.isScanning) {
+        const isFresh = !state.startedAt || Date.now() - state.startedAt < 5 * 60 * 1000;
+        if (isFresh) {
+          setTimeout(() => runScanStep(state), 600);
+        } else {
+          chrome.storage.local.remove('amzScanState');
+        }
       }
     });
   });

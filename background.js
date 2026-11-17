@@ -246,7 +246,16 @@ async function resolvePopoverInvoiceUrl(popoverUrl) {
     const res = await fetch(popoverUrl, { credentials: 'include' });
     if (!res.ok) return null;
     const html = await res.text();
-    // 適格請求書やインボイス付近、または /documents/download/ を含むリンクを正規表現で抽出
+    // <a>タグごとに抽出し、「適格請求書 / インボイス」のリンクを最優先
+    const anchorMatches = Array.from(
+      html.matchAll(/<a[^>]*href=["']([^"']*\/documents\/download\/[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi)
+    );
+    if (anchorMatches.length > 0) {
+      const invoiceAnchor = anchorMatches.find((m) => /適格請求書|インボイス/i.test(m[2]));
+      const chosen = invoiceAnchor || anchorMatches[0];
+      const rawHref = chosen[1].replace(/&amp;/g, '&');
+      return rawHref.startsWith('http') ? rawHref : `https://www.amazon.co.jp${rawHref}`;
+    }
     const matches = Array.from(html.matchAll(/href=["']([^"']*\/documents\/download\/[^"']*)["']/gi));
     if (!matches.length) return null;
     const rawHref = matches[0][1].replace(/&amp;/g, '&');
@@ -344,6 +353,8 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
       });
     }
 
+    let sessionExpiredMsg = null;
+
     for (let i = 0; i < items.length; i++) {
       if (isCancelled) break;
 
@@ -372,8 +383,8 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
           item.pdfType = '原本PDF';
         } catch (err) {
           if (err.message.includes('ログインセッション')) {
-            notifyProgress(sourceTabId, i, items.length, err.message, true);
-            return;
+            sessionExpiredMsg = err.message;
+            break;
           }
           console.warn(`[直接PDF失敗→印刷ページへフォールバック] ${item.orderId}:`, err.message);
           item.url = `https://www.amazon.co.jp/gp/css/summary/print.html?ie=UTF8&orderID=${item.orderId}`;
@@ -404,14 +415,15 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
           } catch (err) {
             console.error(`[PDF生成失敗 attempt=${attempt}] ${item.orderId}:`, err);
             if (err.message.includes('ログインセッション')) {
-              notifyProgress(sourceTabId, i, items.length, err.message, true);
-              return;
+              sessionExpiredMsg = err.message;
+              break;
             }
             if (attempt < 2) {
               await new Promise((r) => setTimeout(r, 1200));
             }
           }
         }
+        if (sessionExpiredMsg) break;
       }
 
       if (saved) {
@@ -455,11 +467,13 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
       await downloadDataUrl(csvDataUrl, `Amazon領収書/${today}_Amazon領収書一覧.csv`);
     }
 
-    const finalMsg = isCancelled
-      ? `中止しました (${successCount}/${items.length}件 保存済み)`
-      : failedItems.length > 0
-        ? `完了: ${successCount}/${items.length}件保存（失敗: ${failedItems.length}件）`
-        : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
+    const finalMsg = sessionExpiredMsg
+      ? `${sessionExpiredMsg} (${successCount}件保存済み)`
+      : isCancelled
+        ? `中止しました (${successCount}/${items.length}件 保存済み)`
+        : failedItems.length > 0
+          ? `完了: ${successCount}/${items.length}件保存（失敗: ${failedItems.length}件）`
+          : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
 
     notifyProgress(sourceTabId, items.length, items.length, finalMsg, true, {
       historyCount,
