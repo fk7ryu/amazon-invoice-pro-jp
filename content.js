@@ -11,8 +11,10 @@
     dateTo: '',
     filenameTemplate: '{date}_{price}_Amazon_{orderId}',
     preferInvoicePdf: true,
+    zipOutput: false,
     skipDownloaded: false,
-    exportCsv: true
+    exportCsv: true,
+    csvFormat: 'standard'
   };
 
   // 拡張機能コンテキストが有効か確認して安全にメッセージ送信
@@ -74,6 +76,7 @@
     const upgradeBtn = document.getElementById('amz-upgrade-inline-btn');
     const csvCheckbox = document.getElementById('amz-export-csv');
     const csvLabel = document.getElementById('amz-csv-label');
+    const csvFormatSelect = document.getElementById('amz-csv-format');
 
     if (!badgeEl) return;
 
@@ -84,7 +87,8 @@
       badgeEl.style.borderColor = '#ceead6';
       if (upgradeBtn) upgradeBtn.style.display = 'none';
       if (csvCheckbox) csvCheckbox.disabled = false;
-      if (csvLabel) csvLabel.textContent = '注文一覧CSVも同時に保存';
+      if (csvFormatSelect) csvFormatSelect.disabled = false;
+      if (csvLabel) csvLabel.textContent = '会計ソフト用CSVも同時に保存';
     } else {
       badgeEl.textContent = `無料枠: 今月あと ${license.remaining}/${license.monthlyLimit}件`;
       badgeEl.style.background = '#fff8e1';
@@ -95,7 +99,8 @@
         csvCheckbox.checked = false;
         csvCheckbox.disabled = true;
       }
-      if (csvLabel) csvLabel.textContent = '注文一覧CSVも同時に保存 (Pro限定)';
+      if (csvFormatSelect) csvFormatSelect.disabled = true;
+      if (csvLabel) csvLabel.textContent = '会計ソフト用CSVも同時に保存 (Pro限定)';
     }
   }
 
@@ -401,14 +406,26 @@
             </label>
 
             <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11.5px; cursor:pointer;">
+              <input type="checkbox" id="amz-zip-output" />
+              <span>PDF・CSVを1つのZIPにまとめて保存</span>
+            </label>
+
+            <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11.5px; cursor:pointer;">
               <input type="checkbox" id="amz-skip-downloaded" />
               <span>取得済みの注文をスキップ (<span id="amz-history-count">${downloadedOrderIds.length}</span>件)</span>
             </label>
 
-            <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11.5px; cursor:pointer;">
+            <label style="display:flex; align-items:center; gap:6px; margin-bottom:4px; font-size:11.5px; cursor:pointer;">
               <input type="checkbox" id="amz-export-csv" />
-              <span id="amz-csv-label">注文一覧CSVも同時に保存</span>
+              <span id="amz-csv-label">会計ソフト用CSVも同時に保存</span>
             </label>
+
+            <select id="amz-csv-format" style="width:100%; padding:4px; border:1px solid #ccc; border-radius:4px; font-size:11px; margin-bottom:8px;">
+              <option value="standard">標準一覧（Excel確認用）</option>
+              <option value="freee">freee会計 インポート形式</option>
+              <option value="mf">マネーフォワード クラウド仕訳形式</option>
+              <option value="yayoi">弥生会計 仕訳インポート形式</option>
+            </select>
 
             <button id="amz-clear-history-btn" type="button" style="
               background:#fff; border:1px solid #ccc; border-radius:4px; padding:3px 8px; font-size:11px; color:#555; cursor:pointer;
@@ -468,8 +485,10 @@
     document.getElementById('amz-date-to').value = settings.dateTo;
     document.getElementById('amz-filename-tpl').value = settings.filenameTemplate;
     document.getElementById('amz-prefer-invoice').checked = settings.preferInvoicePdf;
+    document.getElementById('amz-zip-output').checked = Boolean(settings.zipOutput);
     document.getElementById('amz-skip-downloaded').checked = settings.skipDownloaded;
     document.getElementById('amz-export-csv').checked = settings.exportCsv;
+    document.getElementById('amz-csv-format').value = settings.csvFormat || 'standard';
 
     // プリセットドロップダウンとテキスト入力を同期
     const presetEl = document.getElementById('amz-filename-preset');
@@ -486,8 +505,10 @@
         dateTo: document.getElementById('amz-date-to').value,
         filenameTemplate: tplEl.value.trim() || DEFAULT_SETTINGS.filenameTemplate,
         preferInvoicePdf: document.getElementById('amz-prefer-invoice').checked,
+        zipOutput: document.getElementById('amz-zip-output').checked,
         skipDownloaded: document.getElementById('amz-skip-downloaded').checked,
-        exportCsv: document.getElementById('amz-export-csv').checked
+        exportCsv: document.getElementById('amz-export-csv').checked,
+        csvFormat: document.getElementById('amz-csv-format').value
       });
     };
 
@@ -509,8 +530,10 @@
       'amz-date-to',
       'amz-filename-tpl',
       'amz-prefer-invoice',
+      'amz-zip-output',
       'amz-skip-downloaded',
-      'amz-export-csv'
+      'amz-export-csv',
+      'amz-csv-format'
     ].forEach((id) => {
       document.getElementById(id).addEventListener('change', syncSettings);
     });
@@ -919,10 +942,12 @@
     updateStatus(`${targetItems.length}件のPDF生成を開始します...`, 0);
 
     const exportCsv = license.isPaid && document.getElementById('amz-export-csv').checked;
+    const csvFormat = document.getElementById('amz-csv-format').value || 'standard';
+    const zipOutput = document.getElementById('amz-zip-output').checked;
     try {
       chrome.runtime.sendMessage({
         action: 'START_DOWNLOAD',
-        payload: { items: targetItems, exportCsv }
+        payload: { items: targetItems, exportCsv, csvFormat, zipOutput }
       });
     } catch (_) {
       setRunningState(false);

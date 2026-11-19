@@ -1,8 +1,15 @@
-importScripts('ExtPay.js');
+importScripts('ExtPay.js', 'zip_builder.js', 'csv_formatter.js');
 
 // ExtensionPayで発行した拡張機能ID（スラッグ）を設定してください
 const EXTPAY_EXTENSION_ID = 'amazon-invoice-pro-jp';
 const FREE_MONTHLY_LIMIT = 10;
+
+// 初回インストール時に使い方ガイドを自動で開く
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+  }
+});
 
 let isCancelled = false;
 let isRunning = false;
@@ -133,8 +140,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'START_DOWNLOAD') {
     if (isRunning) return;
     const sourceTabId = sender.tab ? sender.tab.id : null;
-    const { items, exportCsv } = message.payload;
-    processPdfQueue(items, exportCsv, sourceTabId);
+    const { items, exportCsv, csvFormat, zipOutput } = message.payload;
+    processPdfQueue(items, exportCsv, sourceTabId, {
+      csvFormat: csvFormat || 'standard',
+      zipOutput: Boolean(zipOutput)
+    });
   } else if (message.action === 'CANCEL_DOWNLOAD') {
     isCancelled = true;
   }
@@ -207,14 +217,29 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// UTF-8文字列（BOM付き）をBase64エンコード
-function encodeUtf8BomBase64(text) {
+// Base64文字列を Uint8Array へ変換
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// UTF-8文字列（BOM付き）を Uint8Array へ変換
+function encodeUtf8BomBytes(text) {
   const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
   const body = new TextEncoder().encode(text);
   const merged = new Uint8Array(bom.length + body.length);
   merged.set(bom, 0);
   merged.set(body, bom.length);
-  return arrayBufferToBase64(merged.buffer);
+  return merged;
+}
+
+// UTF-8文字列（BOM付き）をBase64エンコード
+function encodeUtf8BomBase64(text) {
+  return arrayBufferToBase64(encodeUtf8BomBytes(text).buffer);
 }
 
 // CSVフィールドのエスケープ
@@ -265,8 +290,8 @@ async function resolvePopoverInvoiceUrl(popoverUrl) {
   }
 }
 
-// 直接PDFリンク（適格請求書など）をフェッチして保存
-async function downloadDirectPdf(url, filename) {
+// 直接PDFリンク（適格請求書など）をフェッチして保存（zipOutput時はバイト配列を返す）
+async function downloadDirectPdf(url, filename, returnBytes = false) {
   const res = await fetch(url, { credentials: 'include' });
   if (res.url && res.url.includes('/ap/signin')) {
     throw new Error('Amazonのログインセッションが切れました。再ログインしてください。');
@@ -279,12 +304,16 @@ async function downloadDirectPdf(url, filename) {
     throw new Error('直接PDF以外のレスポンスが返されました');
   }
   const buffer = await res.arrayBuffer();
+  if (returnBytes) {
+    return new Uint8Array(buffer);
+  }
   const base64 = arrayBufferToBase64(buffer);
   await downloadDataUrl(`data:application/pdf;base64,${base64}`, filename);
+  return true;
 }
 
-// タブを使って印刷用ページからPDFを生成・保存
-async function printTabToPdf(tabId, item) {
+// タブを使って印刷用ページからPDFを生成・保存（zipOutput時はバイト配列を返す）
+async function printTabToPdf(tabId, item, returnBytes = false) {
   const loadPromise = waitForTabComplete(tabId);
   await chrome.tabs.update(tabId, { url: item.url });
   const updatedTab = await loadPromise;
@@ -294,7 +323,7 @@ async function printTabToPdf(tabId, item) {
   }
 
   await new Promise((r) => setTimeout(r, 800));
-  if (isCancelled) return false;
+  if (isCancelled) return null;
 
   const pdfResult = await chrome.debugger.sendCommand({ tabId }, 'Page.printToPDF', {
     printBackground: true,
@@ -307,13 +336,19 @@ async function printTabToPdf(tabId, item) {
     marginRight: 0.4
   });
 
+  if (returnBytes) {
+    return base64ToUint8Array(pdfResult.data);
+  }
   const pdfDataUrl = `data:application/pdf;base64,${pdfResult.data}`;
   await downloadDataUrl(pdfDataUrl, item.filename);
   return true;
 }
 
 // PDF一括生成メイン処理
-async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
+async function processPdfQueue(rawItems, exportCsv, sourceTabId, options = {}) {
+  const csvFormat = options.csvFormat || 'standard';
+  const zipOutput = Boolean(options.zipOutput);
+
   isRunning = true;
   isCancelled = false;
 
@@ -322,6 +357,7 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
   let successCount = 0;
   const completedItems = [];
   const failedItems = [];
+  const zipEntries = [];
 
   try {
     // サーバー側（background）でもライセンス・無料枠を厳密チェック
@@ -378,7 +414,13 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
 
       if (item.isDirectPdf) {
         try {
-          await downloadDirectPdf(item.url, item.filename);
+          const result = await downloadDirectPdf(item.url, item.filename, zipOutput);
+          if (zipOutput && result instanceof Uint8Array) {
+            zipEntries.push({
+              name: item.filename.replace(/^Amazon領収書\//, ''),
+              data: result
+            });
+          }
           saved = true;
           item.pdfType = '原本PDF';
         } catch (err) {
@@ -406,8 +448,14 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
         for (let attempt = 1; attempt <= 2; attempt++) {
           if (isCancelled) break;
           try {
-            const ok = await printTabToPdf(workerTab.id, item);
-            if (ok) {
+            const result = await printTabToPdf(workerTab.id, item, zipOutput);
+            if (result) {
+              if (zipOutput && result instanceof Uint8Array) {
+                zipEntries.push({
+                  name: item.filename.replace(/^Amazon領収書\//, ''),
+                  data: result
+                });
+              }
               saved = true;
               item.pdfType = '印刷生成PDF';
             }
@@ -446,25 +494,27 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
     const historyCount = await recordDownloadedOrderIds(completedItems.map((it) => it.orderId));
     const latestLicense = await getLicenseStatus();
 
-    // ProプランのみCSVサマリー出力
-    if (!isCancelled && allowCsv && completedItems.length > 0) {
-      const header = ['注文日', '注文番号', '金額(円)', '商品名', 'PDF種別', '保存ファイル名', '領収書URL'];
-      const rows = completedItems.map((it) => [
-        it.dateIso || it.date,
-        it.orderId,
-        it.priceNum,
-        it.title,
-        it.pdfType || '',
-        it.filename,
-        it.url
-      ]);
-      const csvText = [header, ...rows]
-        .map((row) => row.map(escapeCsv).join(','))
-        .join('\r\n');
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const csvDataUrl = `data:text/csv;charset=utf-8;base64,${encodeUtf8BomBase64(csvText)}`;
-      await downloadDataUrl(csvDataUrl, `Amazon領収書/${today}_Amazon領収書一覧.csv`);
+    // Proプランのみ会計ソフト別CSV生成
+    let csvInfo = null;
+    if (!isCancelled && allowCsv && completedItems.length > 0) {
+      csvInfo = buildFormattedCsv(completedItems, csvFormat, 'Amazon.co.jp');
+    }
+
+    if (zipOutput && zipEntries.length > 0) {
+      if (csvInfo) {
+        zipEntries.push({
+          name: `${today}_Amazon領収書_${csvInfo.fileSuffix}.csv`,
+          data: encodeUtf8BomBytes(csvInfo.csvText)
+        });
+      }
+      const zipBytes = buildZipArchive(zipEntries);
+      const zipDataUrl = `data:application/zip;base64,${arrayBufferToBase64(zipBytes.buffer)}`;
+      await downloadDataUrl(zipDataUrl, `Amazon領収書/${today}_Amazon領収書まとめ.zip`);
+    } else if (csvInfo) {
+      const csvDataUrl = `data:text/csv;charset=utf-8;base64,${encodeUtf8BomBase64(csvInfo.csvText)}`;
+      await downloadDataUrl(csvDataUrl, `Amazon領収書/${today}_Amazon領収書_${csvInfo.fileSuffix}.csv`);
     }
 
     const finalMsg = sessionExpiredMsg
@@ -473,7 +523,9 @@ async function processPdfQueue(rawItems, exportCsv, sourceTabId) {
         ? `中止しました (${successCount}/${items.length}件 保存済み)`
         : failedItems.length > 0
           ? `完了: ${successCount}/${items.length}件保存（失敗: ${failedItems.length}件）`
-          : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
+          : zipOutput
+            ? `完了: ${successCount}件を1つのZIPにまとめました`
+            : `完了: ${successCount}/${items.length}件のPDFを保存しました`;
 
     notifyProgress(sourceTabId, items.length, items.length, finalMsg, true, {
       historyCount,
